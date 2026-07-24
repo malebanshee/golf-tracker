@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>高尔夫记杆</title>
+
+<!-- 让 iOS 用"添加到主屏幕"后,以全屏App方式打开,不显示Safari地址栏 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="高尔夫记杆">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1c6e35">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+  :root {
+    --green: #1c6e35;
+    --green-dark: #14521f;
+    --red: #d63029;
+    --bg: #f5f6f4;
+    --card: #ffffff;
+    --text: #1a1a1a;
+    --muted: #6b6b6b;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+  }
+  #app {
+    max-width: 480px;
+    margin: 0 auto;
+    min-height: 100vh;
+    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+  header {
+    background: var(--green);
+    color: white;
+    padding: calc(14px + env(safe-area-inset-top)) 16px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header .back {
+    font-size: 22px;
+    padding: 4px 8px;
+    margin-left: -8px;
+    cursor: pointer;
+  }
+  header h1 {
+    font-size: 18px;
+    margin: 0;
+    flex: 1;
+    font-weight: 600;
+  }
+  header .action {
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 4px 6px;
+  }
+  main { padding: 14px 16px; }
+  .card {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .card.clickable { cursor: pointer; }
+  .card.clickable:active { background: #f0f0f0; }
+  .card h3 { margin: 0 0 4px; font-size: 16px; }
+  .card .sub { color: var(--muted); font-size: 13px; }
+  .row { display: flex; justify-content: space-between; align-items: center; }
+  .empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 60px 20px;
+    font-size: 15px;
+  }
+  .btn {
+    display: block;
+    width: 100%;
+    background: var(--green);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 14px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 8px;
+  }
+  .btn:active { background: var(--green-dark); }
+  .btn.secondary {
+    background: #e9e9e9;
+    color: var(--text);
+  }
+  .btn.secondary:active { background: #dcdcdc; }
+  .btn[disabled] { opacity: 0.45; }
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .field input, .field select {
+    width: 100%;
+    padding: 12px;
+    font-size: 16px;
+    border-radius: 10px;
+    border: 1px solid #ddd;
+    background: white;
+  }
+  .segmented {
+    display: flex;
+    background: #eee;
+    border-radius: 10px;
+    padding: 3px;
+    margin-bottom: 10px;
+  }
+  .segmented button {
+    flex: 1;
+    border: none;
+    background: transparent;
+    padding: 9px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .segmented button.active {
+    background: white;
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  }
+  #map {
+    height: 280px;
+    border-radius: 12px;
+    margin: 10px 0;
+  }
+  .hint {
+    font-size: 12px;
+    color: var(--muted);
+    margin: 4px 0 10px;
+  }
+  .distance-badge {
+    text-align: center;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--green-dark);
+    padding: 10px 0;
+  }
+  .shot-index {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px; height: 26px;
+    background: var(--green);
+    color: white;
+    border-radius: 50%;
+    font-size: 13px;
+    font-weight: 700;
+    margin-right: 8px;
+  }
+  .total-box {
+    text-align: center;
+    padding: 6px 0 2px;
+  }
+  .total-box .num { font-size: 26px; font-weight: 700; color: var(--green-dark); }
+  .swipe-delete {
+    color: var(--red);
+    font-size: 13px;
+    text-align: right;
+    margin-top: 6px;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* ================= 数据层 ================= */
+const STORAGE_KEY = "golfTrackerData_v1";
+
+function loadDB() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return { rounds: [] };
+}
+function saveDB() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+}
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+let db = loadDB();
+
+const CLUBS = [
+  "1号木 (Driver)", "3号木", "5号木", "3号杂交杆", "4号杂交杆",
+  "3号铁", "4号铁", "5号铁", "6号铁", "7号铁", "8号铁", "9号铁",
+  "劈起杆 (PW)", "挖起杆 (GW)", "沙坑杆 (SW)", "挖起杆 (LW)", "推杆 (Putter)"
+];
+
+function distanceMeters(a, b) {
+  const R = 6371000;
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+  const h = Math.sin(dLat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function fmtDist(m) {
+  return `${Math.round(m)} 米 / ${Math.round(m * 1.09361)} 码`;
+}
+function fmtDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+/* ================= 路由 / 状态 ================= */
+let route = { screen: "rounds" };
+const app = document.getElementById("app");
+
+function nav(newRoute) {
+  route = newRoute;
+  render();
+}
+
+function render() {
+  if (route.screen === "rounds") return renderRounds();
+  if (route.screen === "newRound") return renderNewRound();
+  if (route.screen === "round") return renderRoundDetail(route.roundId);
+  if (route.screen === "hole") return renderHoleDetail(route.roundId, route.holeId);
+  if (route.screen === "addShot") return renderAddShot(route.roundId, route.holeId);
+}
+
+function findRound(id) { return db.rounds.find(r => r.id === id); }
+function findHole(round, id) { return round.holes.find(h => h.id === id); }
+function holeShotsTotal(hole) {
+  return hole.shots.reduce((sum, s) => sum + s.distanceMeters, 0);
+}
+
+/* ================= 页面: 球局列表 ================= */
+function renderRounds() {
+  const rounds = [...db.rounds].sort((a, b) => new Date(b.date) - new Date(a.date));
+  app.innerHTML = `
+    <header>
+      <h1>我的球局</h1>
+      <div class="action" onclick="nav({screen:'newRound'})">＋ 新球局</div>
+    </header>
+    <main>
+      ${rounds.length === 0 ? `<div class="empty">还没有球局记录<br>点右上角"新球局"开始</div>` : ""}
+      ${rounds.map(r => `
+        <div class="card clickable" onclick="nav({screen:'round', roundId:'${r.id}'})">
+          <h3>${escapeHtml(r.courseName)}</h3>
+          <div class="sub">${fmtDate(r.date)} · ${r.holes.length} 洞</div>
+        </div>
+      `).join("")}
+    </main>
+  `;
+}
+
+function renderNewRound() {
+  app.innerHTML = `
+    <header>
+      <div class="back" onclick="nav({screen:'rounds'})">‹</div>
+      <h1>新建球局</h1>
+      <div class="action" onclick="createRound()">创建</div>
+    </header>
+    <main>
+      <div class="field">
+        <label>球场名称</label>
+        <input id="courseNameInput" placeholder="例如: 某某高尔夫俱乐部" autofocus>
+      </div>
+    </main>
+  `;
+  setTimeout(() => document.getElementById("courseNameInput")?.focus(), 100);
+}
+function createRound() {
+  const name = document.getElementById("courseNameInput").value.trim() || "未命名球场";
+  const round = { id: uid(), courseName: name, date: new Date().toISOString(), holes: [] };
+  db.rounds.push(round);
+  saveDB();
+  nav({ screen: "round", roundId: round.id });
+}
+
+/* ================= 页面: 球局详情(球洞列表) ================= */
+function renderRoundDetail(roundId) {
+  const round = findRound(roundId);
+  if (!round) return nav({ screen: "rounds" });
+  const holes = [...round.holes].sort((a, b) => a.number - b.number);
+
+  app.innerHTML = `
+    <header>
+      <div class="back" onclick="nav({screen:'rounds'})">‹</div>
+      <h1>${escapeHtml(round.courseName)}</h1>
+    </header>
+    <main>
+      <div class="card">
+        <div class="sub">${fmtDate(round.date)}</div>
+      </div>
+      ${holes.map(h => `
+        <div class="card clickable row" onclick="nav({screen:'hole', roundId:'${round.id}', holeId:'${h.id}'})">
+          <h3 style="margin:0">第 ${h.number} 洞</h3>
+          <div class="sub">${h.shots.length} 杆</div>
+        </div>
+      `).join("")}
+      <button class="btn" onclick="addHole('${round.id}')">＋ 添加下一洞</button>
+    </main>
+  `;
+}
+function addHole(roundId) {
+  const round = findRound(roundId);
+  const nextNumber = round.holes.length ? Math.max(...round.holes.map(h => h.number)) + 1 : 1;
+  const hole = { id: uid(), number: nextNumber, shots: [] };
+  round.holes.push(hole);
+  saveDB();
+  nav({ screen: "hole", roundId: round.id, holeId: hole.id });
+}
+
+/* ================= 页面: 球洞详情(每一杆列表) ================= */
+function renderHoleDetail(roundId, holeId) {
+  const round = findRound(roundId);
+  if (!round) return nav({ screen: "rounds" });
+  const hole = findHole(round, holeId);
+  if (!hole) return nav({ screen: "round", roundId });
+
+  const shots = [...hole.shots].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  const total = holeShotsTotal(hole);
+
+  app.innerHTML = `
+    <header>
+      <div class="back" onclick="nav({screen:'round', roundId:'${round.id}'})">‹</div>
+      <h1>第 ${hole.number} 洞</h1>
+      <div class="action" onclick="nav({screen:'addShot', roundId:'${round.id}', holeId:'${hole.id}'})">＋ 记一杆</div>
+    </header>
+    <main>
+      <div class="card total-box">
+        <div class="sub">本洞总距离</div>
+        <div class="num">${fmtDist(total)}</div>
+      </div>
+      ${shots.length === 0 ? `<div class="empty">还没有记录, 点右上角"记一杆"</div>` : ""}
+      ${shots.map((s, i) => `
+        <div class="card">
+          <div class="row">
+            <h3><span class="shot-index">${i + 1}</span>${escapeHtml(s.club)}</h3>
+          </div>
+          <div class="sub">距离: ${fmtDist(s.distanceMeters)}</div>
+          <div class="swipe-delete" onclick="deleteShot('${round.id}','${hole.id}','${s.id}')">删除这一杆</div>
+        </div>
+      `).join("")}
+    </main>
+  `;
+}
+function deleteShot(roundId, holeId, shotId) {
+  const round = findRound(roundId);
+  const hole = findHole(round, holeId);
+  hole.shots = hole.shots.filter(s => s.id !== shotId);
+  saveDB();
+  render();
+}
+
+/* ================= 页面: 记录一杆 ================= */
+let shotDraft = null;
+let leafletMap = null;
+let startMarker = null;
+let endMarker = null;
+
+function renderAddShot(roundId, holeId) {
+  const round = findRound(roundId);
+  const hole = findHole(round, holeId);
+  if (!round || !hole) return nav({ screen: "rounds" });
+
+  shotDraft = { club: CLUBS[0], start: null, end: null, editing: "start" };
+
+  app.innerHTML = `
+    <header>
+      <div class="back" onclick="nav({screen:'hole', roundId:'${round.id}', holeId:'${hole.id}'})">‹</div>
+      <h1>记录一杆</h1>
+      <div class="action" id="saveBtn" style="opacity:0.4" onclick="saveShot('${round.id}','${hole.id}')">保存</div>
+    </header>
+    <main>
+      <div class="field">
+        <label>选择球杆</label>
+        <select id="clubSelect" onchange="shotDraft.club=this.value">
+          ${CLUBS.map(c => `<option value="${c}">${c}</option>`).join("")}
+        </select>
+      </div>
+
+      <div class="segmented" id="editSeg">
+        <button class="active" onclick="setEditing('start')">标记起点</button>
+        <button onclick="setEditing('end')">标记落点</button>
+      </div>
+
+      <button class="btn secondary" onclick="useGPS()">📍 用当前 GPS 位置标记</button>
+      <div class="hint">也可以直接在下方地图上点击来标记或微调位置</div>
+
+      <div id="map"></div>
+
+      <div id="distanceBox"></div>
+    </main>
+  `;
+
+  setTimeout(initMap, 50);
+}
+
+function setEditing(mode) {
+  shotDraft.editing = mode;
+  document.querySelectorAll("#editSeg button").forEach((b, i) => {
+    b.classList.toggle("active", (mode === "start" && i === 0) || (mode === "end" && i === 1));
+  });
+}
+
+function initMap() {
+  const defaultCenter = [25.0330, 121.5654];
+  leafletMap = L.map("map").setView(defaultCenter, 17);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 20,
+    attribution: "© OpenStreetMap"
+  }).addTo(leafletMap);
+
+  leafletMap.on("click", (e) => {
+    setCoordinate({ lat: e.latlng.lat, lng: e.latlng.lng });
+  });
+
+  // 打开地图时先尝试定位一次,把地图中心移过去(不自动标记,只是方便找到自己)
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition((pos) => {
+      leafletMap.setView([pos.coords.latitude, pos.coords.longitude], 18);
+    }, () => {}, { enableHighAccuracy: true, timeout: 5000 });
+  }
+}
+
+function useGPS() {
+  if (!navigator.geolocation) {
+    alert("这个浏览器不支持定位功能");
+    return;
+  }
+  const btn = event.target;
+  btn.textContent = "定位中...";
+  navigator.geolocation.getCurrentPosition((pos) => {
+    btn.textContent = "📍 用当前 GPS 位置标记";
+    setCoordinate({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+  }, (err) => {
+    btn.textContent = "📍 用当前 GPS 位置标记";
+    alert("获取位置失败: " + err.message + "\n请检查是否已允许网页使用定位权限");
+  }, { enableHighAccuracy: true, timeout: 10000 });
+}
+
+function setCoordinate(coord) {
+  if (shotDraft.editing === "start") {
+    shotDraft.start = coord;
+    if (startMarker) leafletMap.removeLayer(startMarker);
+    startMarker = L.marker([coord.lat, coord.lng], {
+      icon: L.divIcon({ className: "", html: "🟢", iconSize: [24,24] })
+    }).addTo(leafletMap).bindTooltip("起点", { permanent: true, direction: "top" });
+    setEditing("end");
+  } else {
+    shotDraft.end = coord;
+    if (endMarker) leafletMap.removeLayer(endMarker);
+    endMarker = L.marker([coord.lat, coord.lng], {
+      icon: L.divIcon({ className: "", html: "🚩", iconSize: [24,24] })
+    }).addTo(leafletMap).bindTooltip("落点", { permanent: true, direction: "top" });
+  }
+  leafletMap.setView([coord.lat, coord.lng], leafletMap.getZoom());
+  updateDistanceBox();
+}
+
+function updateDistanceBox() {
+  const box = document.getElementById("distanceBox");
+  const saveBtn = document.getElementById("saveBtn");
+  if (shotDraft.start && shotDraft.end) {
+    const d = distanceMeters(shotDraft.start, shotDraft.end);
+    box.innerHTML = `<div class="card distance-badge">${fmtDist(d)}</div>`;
+    saveBtn.style.opacity = "1";
+  } else {
+    box.innerHTML = "";
+    saveBtn.style.opacity = "0.4";
+  }
+}
+
+function saveShot(roundId, holeId) {
+  if (!shotDraft.start || !shotDraft.end) return;
+  const round = findRound(roundId);
+  const hole = findHole(round, holeId);
+  const d = distanceMeters(shotDraft.start, shotDraft.end);
+  hole.shots.push({
+    id: uid(),
+    club: shotDraft.club,
+    start: shotDraft.start,
+    end: shotDraft.end,
+    distanceMeters: d,
+    timestamp: new Date().toISOString()
+  });
+  saveDB();
+  nav({ screen: "hole", roundId, holeId });
+}
+
+/* ================= 工具函数 ================= */
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+/* ================= 启动 ================= */
+render();
+</script>
+</body>
+</html>
