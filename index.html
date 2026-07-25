@@ -162,13 +162,15 @@
     padding: 6px 0 2px;
   }
   .total-box .num { font-size: 26px; font-weight: 700; color: var(--green-dark); }
-  .swipe-delete {
-    color: var(--red);
+  .link-action {
+    color: var(--green);
     font-size: 13px;
-    text-align: right;
-    margin-top: 6px;
+    font-weight: 600;
     cursor: pointer;
+    padding: 4px 0;
   }
+  .link-action.danger { color: var(--red); }
+  .link-action:active { opacity: 0.6; }
   .section-title {
     font-size: 13px;
     color: var(--muted);
@@ -293,6 +295,10 @@ const STRINGS = {
     markTeeAction: "标记开球点",
     markTeeHint: "站在发球台(开球位置),点下方按钮用GPS定位,或直接在地图上点击来标记/微调位置",
     recordShotN: n => `记录第 ${n} 杆`,
+    editShot: "编辑",
+    deleteOnlyLastHint: "只有最后一杆可以删除。中间的杆请用「编辑」修改,以免后面每一杆的起点错位。",
+    editShotN: n => `编辑第 ${n} 杆`,
+    totalStrokes: "本洞总杆数",
     markLandingHint: "点下方按钮用GPS定位,或直接在地图上点击标记这一杆的落点",
     finishHole: "结束此洞",
     holeFinishedBadge: "本洞已结束",
@@ -350,6 +356,10 @@ const STRINGS = {
     markTeeAction: "Mark Tee",
     markTeeHint: "Stand at the tee box, tap GPS below, or tap the map to mark / fine-tune the position",
     recordShotN: n => `Record Shot ${n}`,
+    editShot: "Edit",
+    deleteOnlyLastHint: "Only the last shot can be deleted. Use Edit to fix earlier shots, so later shots don't end up starting from the wrong point.",
+    editShotN: n => `Edit Shot ${n}`,
+    totalStrokes: "Strokes on This Hole",
     markLandingHint: "Tap GPS below, or tap the map to mark this shot's landing spot",
     finishHole: "Finish Hole",
     holeFinishedBadge: "Hole completed",
@@ -565,13 +575,38 @@ function render() {
   if (route.screen === "newHole") return renderNewHole(route.roundId);
   if (route.screen === "hole") return renderHoleDetail(route.roundId, route.holeId);
   if (route.screen === "markTee") return renderMarkTee(route.roundId, route.holeId);
-  if (route.screen === "addShot") return renderAddShot(route.roundId, route.holeId);
+  if (route.screen === "addShot") return renderAddShot(route.roundId, route.holeId, route.shotId);
 }
 
 function findRound(id) { return db.rounds.find(r => r.id === id); }
 function findHole(round, id) { return round.holes.find(h => h.id === id); }
 function holeShotsTotal(hole) {
   return hole.shots.reduce((sum, s) => sum + s.distanceMeters, 0);
+}
+
+// 杆数: 一般每条记录算1杆; 推杆记录里填了"几推进洞",就按实际推数算
+function holeStrokeCount(hole) {
+  return hole.shots.reduce((n, s) => {
+    if (s.club === "putter" && s.puttCount > 1) return n + s.puttCount;
+    return n + 1;
+  }, 0);
+}
+
+function sortedShots(hole) {
+  return [...hole.shots].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+}
+
+/* 每一杆的 start 是保存时从"上一杆的 end"快照下来的。
+   一旦编辑/删除了中间某一杆,后面那些杆的 start 就成了悬空的旧值,
+   所以任何结构性改动之后都要重新按顺序把整条链串一遍,并重算距离。 */
+function relinkShots(hole) {
+  if (!hole.teeLocation) return;
+  let prev = hole.teeLocation;
+  sortedShots(hole).forEach(s => {
+    s.start = prev;
+    s.distanceMeters = distanceMeters(prev, s.end);
+    prev = s.end;
+  });
 }
 
 /* ================= 页面: 球局列表 ================= */
@@ -701,7 +736,7 @@ function renderRoundDetail(roundId) {
       ${holes.map(h => `
         <div class="card clickable row" onclick="nav({screen:'hole', roundId:'${round.id}', holeId:'${h.id}'})">
           <h3 style="margin:0">${t("holeTitle", h.number)}${h.finished ? `<span class="badge-done">✓</span>` : ""}</h3>
-          <div class="sub">${t("shotsCount", h.shots.length)}</div>
+          <div class="sub">${t("shotsCount", holeStrokeCount(h))}</div>
         </div>
       `).join("")}
       <button class="btn" onclick="nav({screen:'newHole', roundId:'${round.id}'})">${t("addHole")}</button>
@@ -749,8 +784,9 @@ function renderHoleDetail(roundId, holeId) {
   const hole = findHole(round, holeId);
   if (!hole) return nav({ screen: "round", roundId });
 
-  const shots = [...hole.shots].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  const shots = sortedShots(hole);
   const total = holeShotsTotal(hole);
+  const strokes = holeStrokeCount(hole);
 
   let headerAction = "";
   if (!hole.finished) {
@@ -767,8 +803,10 @@ function renderHoleDetail(roundId, holeId) {
     </header>
     <main>
       <div class="card total-box">
-        <div class="sub">${t("totalDistance")}</div>
-        <div class="num">${fmtDist(total)}</div>
+        <div class="sub">${t("totalStrokes")}</div>
+        <div class="num">${strokes}</div>
+        <div class="sub" style="margin-top:8px">${t("totalDistance")}</div>
+        <div class="num" style="font-size:20px">${fmtDist(total)}</div>
       </div>
 
       ${!hole.teeLocation ? `<div class="empty">${t("teeNotSetHint")}</div>` : `
@@ -784,9 +822,16 @@ function renderHoleDetail(roundId, holeId) {
           </div>
           <div class="sub">${fmtDist(s.distanceMeters)}</div>
           ${s.club === "putter" ? `<div class="sub">${t("puttSummary", s.puttCount, s.firstPuttDistanceFeet)}</div>` : ""}
-          <div class="swipe-delete" onclick="deleteShot('${round.id}','${hole.id}','${s.id}')">${t("deleteShot")}</div>
+          <div class="row" style="justify-content:flex-end;gap:16px;margin-top:6px">
+            <div class="link-action" onclick="nav({screen:'addShot', roundId:'${round.id}', holeId:'${hole.id}', shotId:'${s.id}'})">${t("editShot")}</div>
+            ${i === shots.length - 1
+              ? `<div class="link-action danger" onclick="deleteShot('${round.id}','${hole.id}','${s.id}')">${t("deleteShot")}</div>`
+              : ""}
+          </div>
         </div>
       `).join("")}
+
+      ${shots.length > 1 ? `<div class="hint">${t("deleteOnlyLastHint")}</div>` : ""}
 
       ${hole.finished
         ? `<div class="card" style="text-align:center;color:var(--muted)">${t("holeFinishedBadge")}</div>`
@@ -841,6 +886,9 @@ function initHoleMap(hole) {
 function deleteShot(roundId, holeId, shotId) {
   const round = findRound(roundId);
   const hole = findHole(round, holeId);
+  const shots = sortedShots(hole);
+  // 只允许删最后一杆: 删中间会让后面的杆接到一个物理上没发生过的起点上
+  if (!shots.length || shots[shots.length - 1].id !== shotId) return;
   hole.shots = hole.shots.filter(s => s.id !== shotId);
   saveDB();
   render();
@@ -938,6 +986,8 @@ function saveTee(roundId, holeId) {
   const round = findRound(roundId);
   const hole = findHole(round, holeId);
   hole.teeLocation = teeDraft;
+  // 改了开球点,第一杆的起点和距离要跟着更新
+  relinkShots(hole);
   saveDB();
   nav({ screen: "hole", roundId, holeId });
 }
@@ -951,27 +1001,41 @@ let endInfoWindow = null;
 let existingShotsForMap = [];
 let addShotContext = { roundId: null, holeId: null };
 
-function renderAddShot(roundId, holeId) {
+function renderAddShot(roundId, holeId, shotId) {
   const round = findRound(roundId);
   const hole = findHole(round, holeId);
   if (!round || !hole) return nav({ screen: "rounds" });
 
-  const prevShots = [...hole.shots].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  const startPoint = prevShots.length > 0 ? prevShots[prevShots.length - 1].end : hole.teeLocation;
-  existingShotsForMap = prevShots;
+  const allShots = sortedShots(hole);
+  const editIndex = shotId ? allShots.findIndex(s => s.id === shotId) : -1;
+  const isEdit = editIndex >= 0;
+  const existing = isEdit ? allShots[editIndex] : null;
+
+  // 编辑时,这一杆的起点由它"之前"的杆决定,地图上也只画它之前的杆作为参考
+  const priorShots = isEdit ? allShots.slice(0, editIndex) : allShots;
+  const startPoint = priorShots.length > 0 ? priorShots[priorShots.length - 1].end : hole.teeLocation;
+
+  existingShotsForMap = priorShots;
   addShotContext = { roundId, holeId };
 
-  shotDraft = { club: CLUB_KEYS[0], start: startPoint, end: null, puttCount: null, firstPuttDistanceFeet: null };
+  shotDraft = {
+    shotId: shotId || null,
+    club: existing ? existing.club : CLUB_KEYS[0],
+    start: startPoint,
+    end: existing ? existing.end : null,
+    puttCount: existing ? (existing.puttCount ?? null) : null,
+    firstPuttDistanceFeet: existing ? (existing.firstPuttDistanceFeet ?? null) : null
+  };
   startMarkerObj = null;
   endMarkerObj = null;
   endInfoWindow = null;
 
-  const shotNumber = prevShots.length + 1;
+  const shotNumber = isEdit ? editIndex + 1 : allShots.length + 1;
 
   app.innerHTML = `
     <header>
       <div class="back" onclick="nav({screen:'hole', roundId:'${round.id}', holeId:'${hole.id}'})">‹</div>
-      <h1>${t("recordShotN", shotNumber)}</h1>
+      <h1>${isEdit ? t("editShotN", shotNumber) : t("recordShotN", shotNumber)}</h1>
       <div class="action" id="saveBtn" style="opacity:0.4" onclick="saveShot()">${t("save")}</div>
     </header>
     <main id="addShotMain"></main>
@@ -1152,24 +1216,42 @@ function saveShot() {
 
   const round = findRound(roundId);
   const hole = findHole(round, holeId);
-  const d = distanceMeters(shotDraft.start, shotDraft.end);
+  const isEdit = !!shotDraft.shotId;
 
-  const shot = {
-    id: uid(),
-    club: shotDraft.club,
-    start: shotDraft.start,
-    end: shotDraft.end,
-    distanceMeters: d,
-    timestamp: new Date().toISOString()
-  };
-  if (isPutter) {
-    shot.puttCount = shotDraft.puttCount;
-    shot.firstPuttDistanceFeet = shotDraft.firstPuttDistanceFeet;
+  if (isEdit) {
+    const shot = hole.shots.find(s => s.id === shotDraft.shotId);
+    if (!shot) return nav({ screen: "hole", roundId, holeId });
+    // timestamp 是排序依据,编辑时必须保持不变,否则这一杆会被挪到序列末尾
+    shot.club = shotDraft.club;
+    shot.end = shotDraft.end;
+    if (isPutter) {
+      shot.puttCount = shotDraft.puttCount;
+      shot.firstPuttDistanceFeet = shotDraft.firstPuttDistanceFeet;
+    } else {
+      delete shot.puttCount;
+      delete shot.firstPuttDistanceFeet;
+    }
+  } else {
+    const shot = {
+      id: uid(),
+      club: shotDraft.club,
+      start: shotDraft.start,
+      end: shotDraft.end,
+      distanceMeters: distanceMeters(shotDraft.start, shotDraft.end),
+      timestamp: new Date().toISOString()
+    };
+    if (isPutter) {
+      shot.puttCount = shotDraft.puttCount;
+      shot.firstPuttDistanceFeet = shotDraft.firstPuttDistanceFeet;
+    }
+    hole.shots.push(shot);
   }
-  hole.shots.push(shot);
 
-  if (isPutter) {
-    // Putter记录完= 这一洞结束
+  // 改了落点会让后面那一杆的起点失效,整条链重新串一遍
+  relinkShots(hole);
+
+  if (isPutter && !isEdit) {
+    // 新记录一个推杆 = 这一洞结束(编辑已有推杆不改变本洞完成状态)
     hole.finished = true;
     saveDB();
     nav({ screen: "round", roundId });
@@ -1229,7 +1311,7 @@ function csvCell(v) {
 function exportCSV() {
   const header = [
     "round_id", "course_name", "round_date",
-    "hole_number", "hole_finished",
+    "hole_number", "hole_finished", "hole_strokes",
     "tee_lat", "tee_lng",
     "shot_index", "club",
     "start_lat", "start_lng", "end_lat", "end_lng",
@@ -1243,11 +1325,12 @@ function exportCSV() {
     .sort((a, b) => new Date(a.date) - new Date(b.date))
     .forEach(r => {
       [...r.holes].sort((a, b) => a.number - b.number).forEach(h => {
-        const shots = [...h.shots].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        const shots = sortedShots(h);
+        const strokes = holeStrokeCount(h);
         if (shots.length === 0) {
           rows.push([
             r.id, r.courseName, r.date,
-            h.number, h.finished ? 1 : 0,
+            h.number, h.finished ? 1 : 0, strokes,
             h.teeLocation?.lat ?? "", h.teeLocation?.lng ?? "",
             "", "", "", "", "", "", "", "", "", "", ""
           ].map(csvCell).join(","));
@@ -1256,7 +1339,7 @@ function exportCSV() {
         shots.forEach((s, i) => {
           rows.push([
             r.id, r.courseName, r.date,
-            h.number, h.finished ? 1 : 0,
+            h.number, h.finished ? 1 : 0, strokes,
             h.teeLocation?.lat ?? "", h.teeLocation?.lng ?? "",
             i + 1, s.club,
             s.start.lat, s.start.lng, s.end.lat, s.end.lng,
