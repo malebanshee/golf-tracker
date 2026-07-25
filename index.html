@@ -266,6 +266,7 @@ const STRINGS = {
     useGPS: "📍 用当前 GPS 位置标记",
     locating: "定位中...",
     tapHint: "也可以直接在下方地图上点击来标记或微调位置",
+    startAutoFilled: "起点已自动带入上一杆的落点,可以直接标落点,或点\"标记起点\"手动改",
     noGeoSupport: "这个浏览器不支持定位功能",
     gpsFailed: msg => `获取位置失败: ${msg}\n请检查是否已允许网页使用定位权限`,
     locale: "zh-CN",
@@ -298,6 +299,7 @@ const STRINGS = {
     useGPS: "📍 Use Current GPS Location",
     locating: "Locating...",
     tapHint: "You can also tap the map below to mark or fine-tune the position",
+    startAutoFilled: "Start point auto-filled from your previous shot's landing spot. Tap the map to mark the end, or tap \"Mark Start\" to override.",
     noGeoSupport: "This browser doesn't support geolocation",
     gpsFailed: msg => `Failed to get location: ${msg}\nPlease check location permission for this site`,
     locale: "en-US",
@@ -320,10 +322,10 @@ const CLUB_KEYS = ["driver","wood3","wood5","hybrid3","hybrid4","iron3","iron4",
 const CLUB_LABELS = {
   zh: {
     driver: "1号木 (Driver)", wood3: "3号木", wood5: "5号木",
-    hybrid3: "3号杂交杆", hybrid4: "4号杂交杆",
+    hybrid3: "3号混合杆", hybrid4: "4号混合杆",
     iron3: "3号铁", iron4: "4号铁", iron5: "5号铁", iron6: "6号铁",
     iron7: "7号铁", iron8: "8号铁", iron9: "9号铁",
-    pw: "劈起杆 (PW)", gw: "挖起杆 (GW)", sw: "沙坑杆 (SW)", lw: "挖起杆 (LW)",
+    pw: "PW", gw: "GW", sw: "SW", lw: "LW",
     putter: "推杆 (Putter)"
   },
   en: {
@@ -568,13 +570,18 @@ let shotDraft = null;
 let leafletMap = null;
 let startMarker = null;
 let endMarker = null;
+let existingShotsForMap = [];
 
 function renderAddShot(roundId, holeId) {
   const round = findRound(roundId);
   const hole = findHole(round, holeId);
   if (!round || !hole) return nav({ screen: "rounds" });
 
-  shotDraft = { club: CLUB_KEYS[0], start: null, end: null, editing: "start" };
+  const prevShots = [...hole.shots].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  const prevEnd = prevShots.length > 0 ? prevShots[prevShots.length - 1].end : null;
+  existingShotsForMap = prevShots;
+
+  shotDraft = { club: CLUB_KEYS[0], start: prevEnd, end: null, editing: prevEnd ? "end" : "start" };
   startMarker = null;
   endMarker = null;
 
@@ -593,9 +600,11 @@ function renderAddShot(roundId, holeId) {
       </div>
 
       <div class="segmented" id="editSeg">
-        <button class="active" onclick="setEditing('start')">${t("markStart")}</button>
-        <button onclick="setEditing('end')">${t("markEnd")}</button>
+        <button class="${prevEnd ? "" : "active"}" onclick="setEditing('start')">${t("markStart")}</button>
+        <button class="${prevEnd ? "active" : ""}" onclick="setEditing('end')">${t("markEnd")}</button>
       </div>
+
+      ${prevEnd ? `<div class="hint">${t("startAutoFilled")}</div>` : ""}
 
       <button class="btn secondary" id="gpsBtn" onclick="useGPS()">${t("useGPS")}</button>
       <div class="hint">${t("tapHint")}</div>
@@ -619,17 +628,52 @@ function setEditing(mode) {
 function initMap() {
   const defaultCenter = [25.0330, 121.5654];
   if (leafletMap) { leafletMap.remove(); leafletMap = null; }
-  leafletMap = L.map("map").setView(defaultCenter, 17);
+
+  const initialCenter = shotDraft.start ? [shotDraft.start.lat, shotDraft.start.lng] : defaultCenter;
+  leafletMap = L.map("map").setView(initialCenter, 18);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 20,
     attribution: "© OpenStreetMap"
   }).addTo(leafletMap);
 
+  // 本洞之前已经记录的杆:画路线+编号标记,一直保留在地图上作为参考
+  let existingPoints = [];
+  if (existingShotsForMap.length > 0) {
+    existingShotsForMap.forEach((s, i) => {
+      if (i === 0) existingPoints.push([s.start.lat, s.start.lng]);
+      existingPoints.push([s.end.lat, s.end.lng]);
+    });
+
+    L.polyline(existingPoints, { color: "#1c6e35", weight: 3, dashArray: "6,6", opacity: 0.75 }).addTo(leafletMap);
+
+    L.marker(existingPoints[0], {
+      icon: L.divIcon({ className: "", html: `<div class="marker-tee">${t("teeLabel")}</div>`, iconSize: [26, 26] })
+    }).addTo(leafletMap).bindTooltip(clubLabel(existingShotsForMap[0].club), { direction: "top" });
+
+    existingShotsForMap.forEach((s, i) => {
+      L.marker([s.end.lat, s.end.lng], {
+        icon: L.divIcon({ className: "", html: `<div class="marker-num">${i + 1}</div>`, iconSize: [24, 24] })
+      }).addTo(leafletMap).bindTooltip(clubLabel(s.club), { direction: "top" });
+    });
+  }
+
+  // 当前正在编辑的这一杆的起点(可能是刚带入的上一杆落点,也可能是空的等用户标记)
+  if (shotDraft.start) {
+    startMarker = L.marker([shotDraft.start.lat, shotDraft.start.lng], {
+      icon: L.divIcon({ className: "", html: "🟢", iconSize: [24,24] })
+    }).addTo(leafletMap).bindTooltip(t("markStart"), { permanent: true, direction: "top" });
+  }
+
   leafletMap.on("click", (e) => {
     setCoordinate({ lat: e.latlng.lat, lng: e.latlng.lng });
   });
 
-  if (navigator.geolocation) {
+  if (existingPoints.length > 0) {
+    const bounds = L.latLngBounds(existingPoints);
+    if (shotDraft.start) bounds.extend([shotDraft.start.lat, shotDraft.start.lng]);
+    leafletMap.fitBounds(bounds, { padding: [40, 40] });
+  } else if (!shotDraft.start && navigator.geolocation) {
+    // 本洞第一杆且还没有起点: 用GPS自动定位地图中心方便标记
     navigator.geolocation.getCurrentPosition((pos) => {
       leafletMap.setView([pos.coords.latitude, pos.coords.longitude], 18);
     }, () => {}, { enableHighAccuracy: true, timeout: 5000 });
