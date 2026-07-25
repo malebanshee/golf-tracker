@@ -18,7 +18,7 @@
   创建凭据(API 密钥),并把密钥限制为你的 GitHub Pages 域名,防止被盗用。
   即使只用免费额度,Google 也要求绑定一张信用卡才能启用。
 -->
-<script src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY_HERE"></script>
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAr2t_4Xsb41Lz_GVt47FNzJq83XQOD9-c"></script>
 
 <style>
   :root {
@@ -202,13 +202,35 @@
     margin-left: 6px;
     vertical-align: middle;
   }
-  .delete-icon {
-    font-size: 18px;
-    padding: 6px 4px 6px 12px;
+  .menu-wrap { position: relative; }
+  .kebab-btn {
+    font-size: 20px;
+    line-height: 1;
+    padding: 8px 12px;
     cursor: pointer;
     opacity: 0.55;
   }
-  .delete-icon:active { opacity: 1; }
+  .kebab-btn:active { opacity: 1; }
+  .menu-popup {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+    min-width: 120px;
+    z-index: 20;
+    overflow: hidden;
+  }
+  .menu-item {
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .menu-item:active { background: #f2f2f2; }
+  .menu-item.danger { color: var(--red); }
 </style>
 </head>
 <body>
@@ -227,6 +249,7 @@ const STRINGS = {
     noRounds: '还没有球局记录<br>点右上角"新球局"开始',
     holesCount: n => `${n} 洞`,
     confirmDeleteRound: "确定要删除这场球局吗?里面所有球洞和每一杆的记录都会一起删除,无法恢复。",
+    deleteRoundAction: "删除",
     newRoundTitle: "新建球局",
     create: "创建",
     courseNameLabel: "球场名称",
@@ -277,6 +300,7 @@ const STRINGS = {
     noRounds: 'No rounds yet.<br>Tap "New Round" to start',
     holesCount: n => `${n} holes`,
     confirmDeleteRound: "Delete this round? All holes and shots in it will be permanently removed \u2014 this can't be undone.",
+    deleteRoundAction: "Delete",
     newRoundTitle: "New Round",
     create: "Create",
     courseNameLabel: "Course Name",
@@ -433,6 +457,7 @@ let route = { screen: "rounds" };
 const app = document.getElementById("app");
 
 function nav(newRoute) {
+  openMenuRoundId = null;
   route = newRoute;
   render();
 }
@@ -454,6 +479,8 @@ function holeShotsTotal(hole) {
 }
 
 /* ================= 页面: 球局列表 ================= */
+let openMenuRoundId = null;
+
 function renderRounds() {
   const rounds = [...db.rounds].sort((a, b) => new Date(b.date) - new Date(a.date));
   app.innerHTML = `
@@ -470,12 +497,34 @@ function renderRounds() {
               <h3>${escapeHtml(r.courseName)}</h3>
               <div class="sub">${fmtDate(r.date)} · ${t("holesCount", r.holes.length)}</div>
             </div>
-            <div class="delete-icon" onclick="event.stopPropagation(); deleteRound('${r.id}')">🗑</div>
+            <div class="menu-wrap">
+              <div class="kebab-btn" onclick="toggleRoundMenu('${r.id}', event)">⋯</div>
+              ${openMenuRoundId === r.id ? `
+                <div class="menu-popup">
+                  <div class="menu-item danger" onclick="event.stopPropagation(); deleteRound('${r.id}')">${t("deleteRoundAction")}</div>
+                </div>
+              ` : ""}
+            </div>
           </div>
         </div>
       `).join("")}
     </main>
   `;
+}
+
+function toggleRoundMenu(id, event) {
+  event.stopPropagation();
+  openMenuRoundId = (openMenuRoundId === id) ? null : id;
+  render();
+  if (openMenuRoundId) {
+    setTimeout(() => document.addEventListener("click", closeRoundMenuOnOutsideClick, { once: true }), 0);
+  }
+}
+function closeRoundMenuOnOutsideClick() {
+  if (openMenuRoundId) {
+    openMenuRoundId = null;
+    render();
+  }
 }
 
 function deleteRound(id) {
