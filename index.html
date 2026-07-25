@@ -18,7 +18,7 @@
   创建凭据(API 密钥),并把密钥限制为你的 GitHub Pages 域名,防止被盗用。
   即使只用免费额度,Google 也要求绑定一张信用卡才能启用。
 -->
-<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAr2t_4Xsb41Lz_GVt47FNzJq83XQOD9-c"></script>
+<script src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY_HERE"></script>
 
 <style>
   :root {
@@ -127,7 +127,7 @@
     border: 1px solid #ddd;
     background: white;
   }
-  #map, #holeMap {
+  #map, #holeMap, #teeMap {
     height: 280px;
     border-radius: 12px;
     margin: 10px 0;
@@ -177,18 +177,19 @@
   }
   #langToggleBtn {
     position: fixed;
-    top: calc(10px + env(safe-area-inset-top));
-    right: 12px;
+    bottom: calc(16px + env(safe-area-inset-bottom));
+    right: 16px;
     z-index: 100;
-    background: rgba(0,0,0,0.35);
+    background: rgba(0,0,0,0.55);
     color: white;
     border: none;
     border-radius: 999px;
-    padding: 6px 12px;
+    padding: 8px 14px;
     font-size: 13px;
     font-weight: 700;
     cursor: pointer;
     backdrop-filter: blur(4px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
   }
   .badge-done {
     display: inline-block;
@@ -201,6 +202,13 @@
     margin-left: 6px;
     vertical-align: middle;
   }
+  .delete-icon {
+    font-size: 18px;
+    padding: 6px 4px 6px 12px;
+    cursor: pointer;
+    opacity: 0.55;
+  }
+  .delete-icon:active { opacity: 1; }
 </style>
 </head>
 <body>
@@ -218,6 +226,7 @@ const STRINGS = {
     newRoundBtn: "＋ 新球局",
     noRounds: '还没有球局记录<br>点右上角"新球局"开始',
     holesCount: n => `${n} 洞`,
+    confirmDeleteRound: "确定要删除这场球局吗?里面所有球洞和每一杆的记录都会一起删除,无法恢复。",
     newRoundTitle: "新建球局",
     create: "创建",
     courseNameLabel: "球场名称",
@@ -267,6 +276,7 @@ const STRINGS = {
     newRoundBtn: "+ New Round",
     noRounds: 'No rounds yet.<br>Tap "New Round" to start',
     holesCount: n => `${n} holes`,
+    confirmDeleteRound: "Delete this round? All holes and shots in it will be permanently removed \u2014 this can't be undone.",
     newRoundTitle: "New Round",
     create: "Create",
     courseNameLabel: "Course Name",
@@ -454,13 +464,25 @@ function renderRounds() {
     <main>
       ${rounds.length === 0 ? `<div class="empty">${t("noRounds")}</div>` : ""}
       ${rounds.map(r => `
-        <div class="card clickable" onclick="nav({screen:'round', roundId:'${r.id}'})">
-          <h3>${escapeHtml(r.courseName)}</h3>
-          <div class="sub">${fmtDate(r.date)} · ${t("holesCount", r.holes.length)}</div>
+        <div class="card">
+          <div class="row">
+            <div class="clickable" style="flex:1" onclick="nav({screen:'round', roundId:'${r.id}'})">
+              <h3>${escapeHtml(r.courseName)}</h3>
+              <div class="sub">${fmtDate(r.date)} · ${t("holesCount", r.holes.length)}</div>
+            </div>
+            <div class="delete-icon" onclick="event.stopPropagation(); deleteRound('${r.id}')">🗑</div>
+          </div>
         </div>
       `).join("")}
     </main>
   `;
+}
+
+function deleteRound(id) {
+  if (!confirm(t("confirmDeleteRound"))) return;
+  db.rounds = db.rounds.filter(r => r.id !== id);
+  saveDB();
+  render();
 }
 
 function renderNewRound() {
@@ -823,11 +845,18 @@ function renderAddShotMain() {
 }
 
 function onClubChange(value) {
+  const wasPutter = shotDraft.club === "putter";
+  const isPutter = value === "putter";
   shotDraft.club = value;
-  // 换杆之后"这一点"的含义变了(落点 vs 球洞位置),之前标的点作废,让用户重新标
-  shotDraft.end = null;
-  shotDraft.puttCount = null;
-  shotDraft.firstPuttDistanceFeet = null;
+
+  // 只有putter状态真的变了(这一点的含义从"落点"变成"球洞位置"或反过来),之前标的点才作废
+  if (wasPutter !== isPutter) {
+    shotDraft.end = null;
+  }
+  if (!isPutter) {
+    shotDraft.puttCount = null;
+    shotDraft.firstPuttDistanceFeet = null;
+  }
   renderAddShotMain();
 }
 
@@ -858,16 +887,28 @@ function initMap() {
   endMarkerObj = null;
   endInfoWindow = null;
 
+  // 如果这一点之前已经标过(比如切换球杆前标的落点,普通杆之间互换不会清掉),重新建图时要画回来
+  if (shotDraft.end) {
+    const isPutter = shotDraft.club === "putter";
+    const color = isPutter ? "#222222" : "#d63029";
+    const label = isPutter ? "H" : null;
+    endMarkerObj = makeDotMarker(gmap, shotDraft.end, color, label);
+    endInfoWindow = showInfo(gmap, endMarkerObj, isPutter ? t("holeMarkerLabel") : t("manualMarkEnd"));
+  }
+
   gmap.addListener("click", (e) => {
     setCoordinate({ lat: e.latLng.lat(), lng: e.latLng.lng() });
   });
 
-  if (existingPoints.length > 0) {
+  if (existingPoints.length > 0 || shotDraft.end) {
     const bounds = new google.maps.LatLngBounds();
     existingPoints.forEach(p => bounds.extend(p));
     bounds.extend(shotDraft.start);
+    if (shotDraft.end) bounds.extend(shotDraft.end);
     gmap.fitBounds(bounds, 60);
   }
+
+  updateDistanceBox();
 }
 
 function useGPS() {
