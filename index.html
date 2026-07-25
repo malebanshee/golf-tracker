@@ -12,8 +12,13 @@
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#1c6e35">
 
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!--
+  需要在这里填入你自己的 Google Maps API Key。
+  去 https://console.cloud.google.com/google/maps-apis 创建项目、启用 "Maps JavaScript API"、
+  创建凭据(API 密钥),并把密钥限制为你的 GitHub Pages 域名,防止被盗用。
+  即使只用免费额度,Google 也要求绑定一张信用卡才能启用。
+-->
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAr2t_4Xsb41Lz_GVt47FNzJq83XQOD9-c"></script>
 
 <style>
   :root {
@@ -185,26 +190,6 @@
     cursor: pointer;
     backdrop-filter: blur(4px);
   }
-  .marker-num {
-    background: var(--green);
-    color: white;
-    width: 24px; height: 24px;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 12px; font-weight: 700;
-    border: 2px solid white;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.35);
-  }
-  .marker-tee {
-    background: var(--red);
-    color: white;
-    width: 26px; height: 26px;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 12px; font-weight: 700;
-    border: 2px solid white;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.35);
-  }
   .badge-done {
     display: inline-block;
     background: var(--green);
@@ -268,7 +253,14 @@ const STRINGS = {
     finishHole: "结束此洞",
     holeFinishedBadge: "本洞已结束",
     teeNotSetHint: "还没有标记开球点,先标记开球点才能开始记录这一洞",
-    thisShotStart: "本杆起点"
+    thisShotStart: "本杆起点",
+    manualMarkStart: "手动标记起点",
+    manualMarkEnd: "手动标记落点",
+    holeMarkerLabel: "球洞位置",
+    markHoleHint: "点下方按钮用GPS定位,或直接在地图上点击标记球洞位置",
+    puttCountLabel: "几推进洞",
+    firstPuttDistanceLabel: "一推后距离球洞多少英尺 (feet)",
+    puttSummary: (n, d) => (d !== null && d !== undefined && d !== "") ? `${n} 推进洞 · 首推后剩 ${d} 英尺` : `${n} 推进洞`
   },
   en: {
     myRounds: "My Rounds",
@@ -310,7 +302,14 @@ const STRINGS = {
     finishHole: "Finish Hole",
     holeFinishedBadge: "Hole completed",
     teeNotSetHint: "Tee position not set yet \u2014 mark it before recording shots on this hole",
-    thisShotStart: "Start of this shot"
+    thisShotStart: "Start of this shot",
+    manualMarkStart: "Manually Mark Start",
+    manualMarkEnd: "Manually Mark End",
+    holeMarkerLabel: "Hole Position",
+    markHoleHint: "Tap GPS below, or tap the map to mark the hole (cup) position",
+    puttCountLabel: "Number of Putts to Hole Out",
+    firstPuttDistanceLabel: "Distance Remaining After First Putt (feet)",
+    puttSummary: (n, d) => (d !== null && d !== undefined && d !== "") ? `${n} putt(s) \u00b7 ${d} ft after first putt` : `${n} putt(s)`
   }
 };
 function t(key, ...args) {
@@ -381,6 +380,42 @@ function fmtDist(m) {
 function fmtDate(iso) {
   const d = new Date(iso);
   return d.toLocaleString(t("locale"), { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+/* ================= 地图通用工具函数 (Google Maps) ================= */
+function dotIcon(color, scale) {
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: scale || 11,
+    fillColor: color,
+    fillOpacity: 1,
+    strokeColor: "#ffffff",
+    strokeWeight: 2
+  };
+}
+function dotLabel(text) {
+  return { text: String(text), color: "#ffffff", fontSize: "11px", fontWeight: "700" };
+}
+function makeDotMarker(map, position, color, label) {
+  const opts = { position, map, icon: dotIcon(color) };
+  if (label) opts.label = dotLabel(label);
+  return new google.maps.Marker(opts);
+}
+function drawDashedPolyline(map, path, color) {
+  return new google.maps.Polyline({
+    path, map,
+    strokeOpacity: 0,
+    icons: [{
+      icon: { path: "M 0,-1 0,1", strokeOpacity: 1, strokeColor: color, scale: 3 },
+      offset: "0",
+      repeat: "10px"
+    }]
+  });
+}
+function showInfo(map, marker, text) {
+  const iw = new google.maps.InfoWindow({ content: `<div style="font-size:13px;font-weight:600;">${text}</div>` });
+  iw.open({ map, anchor: marker });
+  return iw;
 }
 
 /* ================= 路由 / 状态 ================= */
@@ -510,7 +545,7 @@ function createHole(roundId) {
 }
 
 /* ================= 页面: 球洞详情(每一杆列表 + 球路地图) ================= */
-let holeLeafletMap = null;
+let gmapHoleRoute = null;
 
 function renderHoleDetail(roundId, holeId) {
   const round = findRound(roundId);
@@ -552,6 +587,7 @@ function renderHoleDetail(roundId, holeId) {
             <h3><span class="shot-index">${i + 1}</span>${escapeHtml(clubLabel(s.club))}</h3>
           </div>
           <div class="sub">${fmtDist(s.distanceMeters)}</div>
+          ${s.club === "putter" ? `<div class="sub">${t("puttSummary", s.puttCount, s.firstPuttDistanceFeet)}</div>` : ""}
           <div class="swipe-delete" onclick="deleteShot('${round.id}','${hole.id}','${s.id}')">${t("deleteShot")}</div>
         </div>
       `).join("")}
@@ -579,36 +615,30 @@ function finishHole(roundId, holeId) {
 function initHoleMap(hole) {
   const el = document.getElementById("holeMap");
   if (!el) return;
-  if (holeLeafletMap) { holeLeafletMap.remove(); holeLeafletMap = null; }
-
-  holeLeafletMap = L.map("holeMap");
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 20,
-    attribution: "© OpenStreetMap"
-  }).addTo(holeLeafletMap);
 
   const shots = [...hole.shots].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  const points = [[hole.teeLocation.lat, hole.teeLocation.lng]];
-  shots.forEach(s => points.push([s.end.lat, s.end.lng]));
+  const points = [hole.teeLocation, ...shots.map(s => s.end)];
 
-  if (points.length > 1) {
-    L.polyline(points, { color: "#1c6e35", weight: 3, dashArray: "6,6" }).addTo(holeLeafletMap);
-  }
-
-  L.marker(points[0], {
-    icon: L.divIcon({ className: "", html: `<div class="marker-tee">${t("teeLabel")}</div>`, iconSize: [26, 26] })
-  }).addTo(holeLeafletMap).bindTooltip(t("markTeeTitle"), { direction: "top" });
-
-  shots.forEach((s, i) => {
-    L.marker([s.end.lat, s.end.lng], {
-      icon: L.divIcon({ className: "", html: `<div class="marker-num">${i + 1}</div>`, iconSize: [24, 24] })
-    }).addTo(holeLeafletMap).bindTooltip(clubLabel(s.club), { direction: "top" });
+  gmapHoleRoute = new google.maps.Map(el, {
+    center: points[0],
+    zoom: 17,
+    mapTypeId: google.maps.MapTypeId.SATELLITE,
+    disableDefaultUI: true,
+    zoomControl: true,
+    gestureHandling: "greedy"
   });
 
   if (points.length > 1) {
-    holeLeafletMap.fitBounds(L.latLngBounds(points), { padding: [30, 30] });
-  } else {
-    holeLeafletMap.setView(points[0], 18);
+    drawDashedPolyline(gmapHoleRoute, points, "#1c6e35");
+  }
+
+  makeDotMarker(gmapHoleRoute, points[0], "#d63029", "T");
+  shots.forEach((s, i) => makeDotMarker(gmapHoleRoute, s.end, "#1c6e35", String(i + 1)));
+
+  if (points.length > 1) {
+    const bounds = new google.maps.LatLngBounds();
+    points.forEach(p => bounds.extend(p));
+    gmapHoleRoute.fitBounds(bounds, 40);
   }
 }
 
@@ -622,8 +652,9 @@ function deleteShot(roundId, holeId, shotId) {
 
 /* ================= 页面: 标记开球点 ================= */
 let teeDraft = null;
-let teeLeafletMap = null;
-let teeMarkerDraft = null;
+let gmapTee = null;
+let teeMarkerObj = null;
+let teeInfoWindow = null;
 
 function renderMarkTee(roundId, holeId) {
   const round = findRound(roundId);
@@ -648,27 +679,34 @@ function renderMarkTee(roundId, holeId) {
 }
 
 function initTeeMap() {
-  const defaultCenter = [25.0330, 121.5654];
-  if (teeLeafletMap) { teeLeafletMap.remove(); teeLeafletMap = null; }
-  teeMarkerDraft = null;
-  const center = teeDraft ? [teeDraft.lat, teeDraft.lng] : defaultCenter;
-  teeLeafletMap = L.map("teeMap").setView(center, 18);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 20,
-    attribution: "© OpenStreetMap"
-  }).addTo(teeLeafletMap);
+  const defaultCenter = { lat: 25.0330, lng: 121.5654 };
+  const center = teeDraft || defaultCenter;
+
+  gmapTee = new google.maps.Map(document.getElementById("teeMap"), {
+    center,
+    zoom: teeDraft ? 19 : 16,
+    mapTypeId: google.maps.MapTypeId.SATELLITE,
+    disableDefaultUI: true,
+    zoomControl: true,
+    gestureHandling: "greedy"
+  });
+
+  teeMarkerObj = null;
+  teeInfoWindow = null;
 
   if (teeDraft) {
-    teeMarkerDraft = L.marker([teeDraft.lat, teeDraft.lng], {
-      icon: L.divIcon({ className: "", html: `<div class="marker-tee">${t("teeLabel")}</div>`, iconSize: [26, 26] })
-    }).addTo(teeLeafletMap);
+    teeMarkerObj = makeDotMarker(gmapTee, teeDraft, "#d63029", "T");
+    teeInfoWindow = showInfo(gmapTee, teeMarkerObj, t("manualMarkStart"));
   }
 
-  teeLeafletMap.on("click", (e) => setTeeCoordinate({ lat: e.latlng.lat, lng: e.latlng.lng }));
+  gmapTee.addListener("click", (e) => {
+    setTeeCoordinate({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+  });
 
   if (!teeDraft && navigator.geolocation) {
     navigator.geolocation.getCurrentPosition((pos) => {
-      teeLeafletMap.setView([pos.coords.latitude, pos.coords.longitude], 18);
+      gmapTee.setCenter({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      gmapTee.setZoom(19);
     }, () => {}, { enableHighAccuracy: true, timeout: 5000 });
   }
 }
@@ -688,11 +726,14 @@ function useTeeGPS() {
 
 function setTeeCoordinate(coord) {
   teeDraft = coord;
-  if (teeMarkerDraft) teeLeafletMap.removeLayer(teeMarkerDraft);
-  teeMarkerDraft = L.marker([coord.lat, coord.lng], {
-    icon: L.divIcon({ className: "", html: `<div class="marker-tee">${t("teeLabel")}</div>`, iconSize: [26, 26] })
-  }).addTo(teeLeafletMap);
-  teeLeafletMap.setView([coord.lat, coord.lng], teeLeafletMap.getZoom());
+  if (teeMarkerObj) {
+    teeMarkerObj.setPosition(coord);
+  } else {
+    teeMarkerObj = makeDotMarker(gmapTee, coord, "#d63029", "T");
+  }
+  if (teeInfoWindow) teeInfoWindow.close();
+  teeInfoWindow = showInfo(gmapTee, teeMarkerObj, t("manualMarkStart"));
+  gmapTee.panTo(coord);
   document.getElementById("saveTeeBtn").style.opacity = "1";
 }
 
@@ -707,10 +748,12 @@ function saveTee(roundId, holeId) {
 
 /* ================= 页面: 记录一杆 ================= */
 let shotDraft = null;
-let leafletMap = null;
-let startMarker = null;
-let endMarker = null;
+let gmap = null;
+let startMarkerObj = null;
+let endMarkerObj = null;
+let endInfoWindow = null;
 let existingShotsForMap = [];
+let addShotContext = { roundId: null, holeId: null };
 
 function renderAddShot(roundId, holeId) {
   const round = findRound(roundId);
@@ -720,10 +763,12 @@ function renderAddShot(roundId, holeId) {
   const prevShots = [...hole.shots].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
   const startPoint = prevShots.length > 0 ? prevShots[prevShots.length - 1].end : hole.teeLocation;
   existingShotsForMap = prevShots;
+  addShotContext = { roundId, holeId };
 
-  shotDraft = { club: CLUB_KEYS[0], start: startPoint, end: null };
-  startMarker = null;
-  endMarker = null;
+  shotDraft = { club: CLUB_KEYS[0], start: startPoint, end: null, puttCount: null, firstPuttDistanceFeet: null };
+  startMarkerObj = null;
+  endMarkerObj = null;
+  endInfoWindow = null;
 
   const shotNumber = prevShots.length + 1;
 
@@ -731,70 +776,97 @@ function renderAddShot(roundId, holeId) {
     <header>
       <div class="back" onclick="nav({screen:'hole', roundId:'${round.id}', holeId:'${hole.id}'})">‹</div>
       <h1>${t("recordShotN", shotNumber)}</h1>
-      <div class="action" id="saveBtn" style="opacity:0.4" onclick="saveShot('${round.id}','${hole.id}')">${t("save")}</div>
+      <div class="action" id="saveBtn" style="opacity:0.4" onclick="saveShot()">${t("save")}</div>
     </header>
-    <main>
+    <main id="addShotMain"></main>
+  `;
+
+  renderAddShotMain();
+}
+
+// 球杆选择会切换UI(尤其是选/取消Putter),所以拆成独立函数,可以局部重渲染而不用整页跳转
+function renderAddShotMain() {
+  const isPutter = shotDraft.club === "putter";
+
+  document.getElementById("addShotMain").innerHTML = `
+    <div class="field">
+      <label>${t("selectClub")}</label>
+      <select id="clubSelect" onchange="onClubChange(this.value)">
+        ${CLUB_KEYS.map(k => `<option value="${k}" ${k === shotDraft.club ? "selected" : ""}>${clubLabel(k)}</option>`).join("")}
+      </select>
+    </div>
+
+    ${isPutter ? `
       <div class="field">
-        <label>${t("selectClub")}</label>
-        <select id="clubSelect" onchange="shotDraft.club=this.value">
-          ${CLUB_KEYS.map(k => `<option value="${k}">${clubLabel(k)}</option>`).join("")}
-        </select>
+        <label>${t("puttCountLabel")}</label>
+        <input id="puttCountInput" type="number" inputmode="numeric" min="1"
+          value="${shotDraft.puttCount ?? ""}"
+          oninput="shotDraft.puttCount = this.value ? parseInt(this.value, 10) : null; updateSaveButtonState();">
       </div>
+      <div class="field">
+        <label>${t("firstPuttDistanceLabel")}</label>
+        <input id="firstPuttDistInput" type="number" inputmode="decimal" min="0" step="0.1"
+          value="${shotDraft.firstPuttDistanceFeet ?? ""}"
+          oninput="shotDraft.firstPuttDistanceFeet = this.value ? parseFloat(this.value) : null;">
+      </div>
+    ` : ""}
 
-      <button class="btn secondary" id="gpsBtn" onclick="useGPS()">${t("useGPS")}</button>
-      <div class="hint">${t("markLandingHint")}</div>
+    <button class="btn secondary" id="gpsBtn" onclick="useGPS()">${t("useGPS")}</button>
+    <div class="hint">${isPutter ? t("markHoleHint") : t("markLandingHint")}</div>
 
-      <div id="map"></div>
+    <div id="map"></div>
 
-      <div id="distanceBox"></div>
-    </main>
+    <div id="distanceBox"></div>
   `;
 
   setTimeout(initMap, 50);
 }
 
+function onClubChange(value) {
+  shotDraft.club = value;
+  // 换杆之后"这一点"的含义变了(落点 vs 球洞位置),之前标的点作废,让用户重新标
+  shotDraft.end = null;
+  shotDraft.puttCount = null;
+  shotDraft.firstPuttDistanceFeet = null;
+  renderAddShotMain();
+}
+
 function initMap() {
-  if (leafletMap) { leafletMap.remove(); leafletMap = null; }
+  gmap = new google.maps.Map(document.getElementById("map"), {
+    center: shotDraft.start,
+    zoom: 19,
+    mapTypeId: google.maps.MapTypeId.SATELLITE,
+    disableDefaultUI: true,
+    zoomControl: true,
+    gestureHandling: "greedy"
+  });
 
-  const initialCenter = [shotDraft.start.lat, shotDraft.start.lng];
-  leafletMap = L.map("map").setView(initialCenter, 18);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 20,
-    attribution: "© OpenStreetMap"
-  }).addTo(leafletMap);
-
-  // 本洞之前已经记录的杆:画路线+编号标记,一直保留在地图上作为参考
+  // 本洞之前已经记录的杆:路线 + 编号标记,作为参考一直保留在地图上
   let existingPoints = [];
   if (existingShotsForMap.length > 0) {
-    existingPoints.push([existingShotsForMap[0].start.lat, existingShotsForMap[0].start.lng]);
-    existingShotsForMap.forEach(s => existingPoints.push([s.end.lat, s.end.lng]));
+    existingPoints.push(existingShotsForMap[0].start);
+    existingShotsForMap.forEach(s => existingPoints.push(s.end));
 
-    L.polyline(existingPoints, { color: "#1c6e35", weight: 3, dashArray: "6,6", opacity: 0.75 }).addTo(leafletMap);
-
-    L.marker(existingPoints[0], {
-      icon: L.divIcon({ className: "", html: `<div class="marker-tee">${t("teeLabel")}</div>`, iconSize: [26, 26] })
-    }).addTo(leafletMap).bindTooltip(t("markTeeTitle"), { direction: "top" });
-
-    existingShotsForMap.forEach((s, i) => {
-      L.marker([s.end.lat, s.end.lng], {
-        icon: L.divIcon({ className: "", html: `<div class="marker-num">${i + 1}</div>`, iconSize: [24, 24] })
-      }).addTo(leafletMap).bindTooltip(clubLabel(s.club), { direction: "top" });
-    });
+    drawDashedPolyline(gmap, existingPoints, "#1c6e35");
+    makeDotMarker(gmap, existingPoints[0], "#d63029", "T");
+    existingShotsForMap.forEach((s, i) => makeDotMarker(gmap, s.end, "#1c6e35", String(i + 1)));
   }
 
-  // 这一杆固定的起点(上一杆落点, 或第一杆时是开球点) —— 只读,不可在这里编辑
-  startMarker = L.marker(initialCenter, {
-    icon: L.divIcon({ className: "", html: "🟢", iconSize: [24, 24] })
-  }).addTo(leafletMap).bindTooltip(t("thisShotStart"), { permanent: true, direction: "top" });
+  // 这一杆固定的起点(上一杆落点,或第一杆时是开球点)—— 只读,不可在这里编辑
+  startMarkerObj = makeDotMarker(gmap, shotDraft.start, "#1c6e35", "S");
 
-  leafletMap.on("click", (e) => {
-    setCoordinate({ lat: e.latlng.lat, lng: e.latlng.lng });
+  endMarkerObj = null;
+  endInfoWindow = null;
+
+  gmap.addListener("click", (e) => {
+    setCoordinate({ lat: e.latLng.lat(), lng: e.latLng.lng() });
   });
 
   if (existingPoints.length > 0) {
-    const bounds = L.latLngBounds(existingPoints);
-    bounds.extend(initialCenter);
-    leafletMap.fitBounds(bounds, { padding: [40, 40] });
+    const bounds = new google.maps.LatLngBounds();
+    existingPoints.forEach(p => bounds.extend(p));
+    bounds.extend(shotDraft.start);
+    gmap.fitBounds(bounds, 60);
   }
 }
 
@@ -816,43 +888,80 @@ function useGPS() {
 
 function setCoordinate(coord) {
   shotDraft.end = coord;
-  if (endMarker) leafletMap.removeLayer(endMarker);
-  endMarker = L.marker([coord.lat, coord.lng], {
-    icon: L.divIcon({ className: "", html: "🚩", iconSize: [24,24] })
-  }).addTo(leafletMap).bindTooltip(t("markEnd"), { permanent: true, direction: "top" });
-  leafletMap.setView([coord.lat, coord.lng], leafletMap.getZoom());
+  const isPutter = shotDraft.club === "putter";
+  const color = isPutter ? "#222222" : "#d63029";
+  const label = isPutter ? "H" : null;
+
+  if (endMarkerObj) {
+    endMarkerObj.setPosition(coord);
+    endMarkerObj.setIcon(dotIcon(color));
+    endMarkerObj.setLabel(label ? dotLabel(label) : null);
+  } else {
+    endMarkerObj = makeDotMarker(gmap, coord, color, label);
+  }
+
+  if (endInfoWindow) endInfoWindow.close();
+  endInfoWindow = showInfo(gmap, endMarkerObj, isPutter ? t("holeMarkerLabel") : t("manualMarkEnd"));
+
+  gmap.panTo(coord);
   updateDistanceBox();
 }
 
 function updateDistanceBox() {
   const box = document.getElementById("distanceBox");
-  const saveBtn = document.getElementById("saveBtn");
   if (shotDraft.end) {
     const d = distanceMeters(shotDraft.start, shotDraft.end);
     box.innerHTML = `<div class="card distance-badge">${fmtDist(d)}</div>`;
-    saveBtn.style.opacity = "1";
   } else {
     box.innerHTML = "";
-    saveBtn.style.opacity = "0.4";
   }
+  updateSaveButtonState();
 }
 
+function updateSaveButtonState() {
+  const saveBtn = document.getElementById("saveBtn");
+  if (!saveBtn) return;
+  const isPutter = shotDraft.club === "putter";
+  let ok = !!shotDraft.end;
+  if (isPutter) {
+    ok = ok && Number.isInteger(shotDraft.puttCount) && shotDraft.puttCount > 0;
+  }
+  saveBtn.style.opacity = ok ? "1" : "0.4";
+}
 
-function saveShot(roundId, holeId) {
-  if (!shotDraft.start || !shotDraft.end) return;
+function saveShot() {
+  const { roundId, holeId } = addShotContext;
+  if (!shotDraft.end) return;
+  const isPutter = shotDraft.club === "putter";
+  if (isPutter && !(Number.isInteger(shotDraft.puttCount) && shotDraft.puttCount > 0)) return;
+
   const round = findRound(roundId);
   const hole = findHole(round, holeId);
   const d = distanceMeters(shotDraft.start, shotDraft.end);
-  hole.shots.push({
+
+  const shot = {
     id: uid(),
     club: shotDraft.club,
     start: shotDraft.start,
     end: shotDraft.end,
     distanceMeters: d,
     timestamp: new Date().toISOString()
-  });
-  saveDB();
-  nav({ screen: "hole", roundId, holeId });
+  };
+  if (isPutter) {
+    shot.puttCount = shotDraft.puttCount;
+    shot.firstPuttDistanceFeet = shotDraft.firstPuttDistanceFeet;
+  }
+  hole.shots.push(shot);
+
+  if (isPutter) {
+    // Putter记录完= 这一洞结束
+    hole.finished = true;
+    saveDB();
+    nav({ screen: "round", roundId });
+  } else {
+    saveDB();
+    nav({ screen: "hole", roundId, holeId });
+  }
 }
 
 /* ================= 工具函数 ================= */
