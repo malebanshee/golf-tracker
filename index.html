@@ -222,6 +222,12 @@
     z-index: 20;
     overflow: hidden;
   }
+  .menu-popup.left { left: 0; right: auto; min-width: 150px; }
+  .kebab-btn.on-header {
+    color: white;
+    opacity: 0.95;
+    margin-left: -8px;
+  }
   .menu-item {
     padding: 12px 16px;
     font-size: 14px;
@@ -250,6 +256,12 @@ const STRINGS = {
     holesCount: n => `${n} 洞`,
     confirmDeleteRound: "确定要删除这场球局吗?里面所有球洞和每一杆的记录都会一起删除,无法恢复。",
     deleteRoundAction: "删除",
+    exportJSON: "导出备份 (JSON)",
+    exportCSV: "导出数据 (CSV)",
+    importJSON: "导入备份",
+    confirmImport: n => `导入后会用备份里的 ${n} 场球局完全替换掉当前数据,现有记录会被覆盖。确定要继续吗?`,
+    importFailed: "导入失败:文件格式不正确,请选择本应用导出的 JSON 备份文件。",
+    backupReminder: "提示:浏览器存储可能被系统清理,建议定期用左上角菜单导出一份备份",
     newRoundTitle: "新建球局",
     create: "创建",
     courseNameLabel: "球场名称",
@@ -301,6 +313,12 @@ const STRINGS = {
     holesCount: n => `${n} holes`,
     confirmDeleteRound: "Delete this round? All holes and shots in it will be permanently removed \u2014 this can't be undone.",
     deleteRoundAction: "Delete",
+    exportJSON: "Export Backup (JSON)",
+    exportCSV: "Export Data (CSV)",
+    importJSON: "Import Backup",
+    confirmImport: n => `This will replace all current data with the ${n} round(s) from the backup. Existing records will be overwritten. Continue?`,
+    importFailed: "Import failed: invalid file format. Please choose a JSON backup exported from this app.",
+    backupReminder: "Tip: browser storage can be cleared by the system \u2014 export a backup periodically from the menu at top left",
     newRoundTitle: "New Round",
     create: "Create",
     courseNameLabel: "Course Name",
@@ -381,23 +399,101 @@ function clubLabel(key) {
   return (CLUB_LABELS[lang] && CLUB_LABELS[lang][key]) || key;
 }
 
-/* ================= 数据层 ================= */
+/* ================= 数据层 =================
+   主存储: IndexedDB (iOS 上比 localStorage 抗回收得多)
+   镜像备份: localStorage (数据量很小,双写一份,IDB 出问题时还能兜底)
+   db 常驻内存,所有读取仍是同步的;saveDB() 保持同步调用签名,内部异步落盘
+*/
 const STORAGE_KEY = "golfTrackerData_v1";
+const IDB_NAME = "golfTrackerDB";
+const IDB_STORE = "kv";
+const IDB_KEY = "data";
 
-function loadDB() {
+let idbHandle = null;
+let lastSaveError = null;
+
+function openIDB() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error("no indexedDB"));
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains(IDB_STORE)) d.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbGet(key) {
+  return new Promise((resolve, reject) => {
+    const tx = idbHandle.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbSet(key, value) {
+  return new Promise((resolve, reject) => {
+    const tx = idbHandle.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function readLocalStorageDB() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
   } catch (e) {}
-  return { rounds: [] };
+  return null;
 }
+
+async function initDB() {
+  try {
+    idbHandle = await openIDB();
+    const fromIDB = await idbGet(IDB_KEY);
+    if (fromIDB && Array.isArray(fromIDB.rounds)) return fromIDB;
+
+    // IDB 里还没有数据 —— 看看是不是老版本用 localStorage 存的,是的话迁移过来
+    const fromLS = readLocalStorageDB();
+    if (fromLS && Array.isArray(fromLS.rounds)) {
+      await idbSet(IDB_KEY, fromLS);
+      return fromLS;
+    }
+    return { rounds: [] };
+  } catch (e) {
+    // IndexedDB 不可用(隐私模式等),退回纯 localStorage
+    console.warn("IndexedDB 不可用,退回 localStorage:", e);
+    idbHandle = null;
+    return readLocalStorageDB() || { rounds: [] };
+  }
+}
+
 function saveDB() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  const snapshot = JSON.stringify(db);
+  // 同步镜像一份到 localStorage(容量小,做兜底)
+  try {
+    localStorage.setItem(STORAGE_KEY, snapshot);
+  } catch (e) {
+    console.warn("localStorage 镜像写入失败:", e);
+  }
+  // 异步写主存储
+  if (idbHandle) {
+    idbSet(IDB_KEY, JSON.parse(snapshot)).catch(e => {
+      lastSaveError = e;
+      console.error("IndexedDB 写入失败:", e);
+    });
+  }
 }
+
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
-let db = loadDB();
+
+let db = { rounds: [] };
 
 function distanceMeters(a, b) {
   const R = 6371000;
@@ -457,7 +553,7 @@ let route = { screen: "rounds" };
 const app = document.getElementById("app");
 
 function nav(newRoute) {
-  openMenuRoundId = null;
+  closeMenus();
   route = newRoute;
   render();
 }
@@ -480,11 +576,22 @@ function holeShotsTotal(hole) {
 
 /* ================= 页面: 球局列表 ================= */
 let openMenuRoundId = null;
+let dataMenuOpen = false;
 
 function renderRounds() {
   const rounds = [...db.rounds].sort((a, b) => new Date(b.date) - new Date(a.date));
   app.innerHTML = `
     <header>
+      <div class="menu-wrap">
+        <div class="kebab-btn on-header" onclick="toggleDataMenu(event)">⋯</div>
+        ${dataMenuOpen ? `
+          <div class="menu-popup left">
+            <div class="menu-item" onclick="event.stopPropagation(); closeMenus(); exportJSON()">${t("exportJSON")}</div>
+            <div class="menu-item" onclick="event.stopPropagation(); closeMenus(); exportCSV()">${t("exportCSV")}</div>
+            <div class="menu-item" onclick="event.stopPropagation(); closeMenus(); triggerImport()">${t("importJSON")}</div>
+          </div>
+        ` : ""}
+      </div>
       <h1>${t("myRounds")}</h1>
       <div class="action" onclick="nav({screen:'newRound'})">${t("newRoundBtn")}</div>
     </header>
@@ -508,22 +615,40 @@ function renderRounds() {
           </div>
         </div>
       `).join("")}
+      ${rounds.length > 0 ? `<div class="hint" style="text-align:center;margin-top:16px">${t("backupReminder")}</div>` : ""}
     </main>
   `;
+}
+
+function toggleDataMenu(event) {
+  event.stopPropagation();
+  dataMenuOpen = !dataMenuOpen;
+  openMenuRoundId = null;
+  render();
+  if (dataMenuOpen) {
+    setTimeout(() => document.addEventListener("click", closeMenusOnOutsideClick, { once: true }), 0);
+  }
+}
+
+function closeMenus() {
+  dataMenuOpen = false;
+  openMenuRoundId = null;
+}
+
+function closeMenusOnOutsideClick() {
+  if (dataMenuOpen || openMenuRoundId) {
+    closeMenus();
+    render();
+  }
 }
 
 function toggleRoundMenu(id, event) {
   event.stopPropagation();
   openMenuRoundId = (openMenuRoundId === id) ? null : id;
+  dataMenuOpen = false;
   render();
   if (openMenuRoundId) {
-    setTimeout(() => document.addEventListener("click", closeRoundMenuOnOutsideClick, { once: true }), 0);
-  }
-}
-function closeRoundMenuOnOutsideClick() {
-  if (openMenuRoundId) {
-    openMenuRoundId = null;
-    render();
+    setTimeout(() => document.addEventListener("click", closeMenusOnOutsideClick, { once: true }), 0);
   }
 }
 
@@ -1061,9 +1186,124 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function tsStamp() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+// iOS Safari 上 <a download> 对 blob 支持不稳定,优先走系统分享面板(可存到"文件"/发给自己)
+async function shareOrDownload(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  try {
+    const file = new File([blob], filename, { type: mimeType });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: filename });
+      return;
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") return; // 用户自己取消了分享,不当作失败
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* ================= 数据导出 / 导入 ================= */
+function exportJSON() {
+  const payload = { exportedAt: new Date().toISOString(), version: 1, ...db };
+  shareOrDownload(`golf-backup-${tsStamp()}.json`, JSON.stringify(payload, null, 2), "application/json");
+}
+
+function csvCell(v) {
+  if (v === null || v === undefined) return "";
+  const s = String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function exportCSV() {
+  const header = [
+    "round_id", "course_name", "round_date",
+    "hole_number", "hole_finished",
+    "tee_lat", "tee_lng",
+    "shot_index", "club",
+    "start_lat", "start_lng", "end_lat", "end_lng",
+    "distance_m", "distance_yd",
+    "putt_count", "first_putt_distance_ft",
+    "timestamp"
+  ];
+  const rows = [header.join(",")];
+
+  [...db.rounds]
+    .sort((a, b) => new Date(a.date) - new Date(b.date))
+    .forEach(r => {
+      [...r.holes].sort((a, b) => a.number - b.number).forEach(h => {
+        const shots = [...h.shots].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        if (shots.length === 0) {
+          rows.push([
+            r.id, r.courseName, r.date,
+            h.number, h.finished ? 1 : 0,
+            h.teeLocation?.lat ?? "", h.teeLocation?.lng ?? "",
+            "", "", "", "", "", "", "", "", "", "", ""
+          ].map(csvCell).join(","));
+          return;
+        }
+        shots.forEach((s, i) => {
+          rows.push([
+            r.id, r.courseName, r.date,
+            h.number, h.finished ? 1 : 0,
+            h.teeLocation?.lat ?? "", h.teeLocation?.lng ?? "",
+            i + 1, s.club,
+            s.start.lat, s.start.lng, s.end.lat, s.end.lng,
+            s.distanceMeters.toFixed(2), (s.distanceMeters * 1.09361).toFixed(2),
+            s.puttCount ?? "", s.firstPuttDistanceFeet ?? "",
+            s.timestamp
+          ].map(csvCell).join(","));
+        });
+      });
+    });
+
+  // BOM: 让 Excel 正确识别 UTF-8,否则中文球场名会乱码
+  shareOrDownload(`golf-shots-${tsStamp()}.csv`, "\ufeff" + rows.join("\n"), "text/csv");
+}
+
+function triggerImport() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.onchange = () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed || !Array.isArray(parsed.rounds)) throw new Error("bad format");
+        if (!confirm(t("confirmImport", parsed.rounds.length))) return;
+        db = { rounds: parsed.rounds };
+        saveDB();
+        nav({ screen: "rounds" });
+      } catch (e) {
+        alert(t("importFailed"));
+      }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
 /* ================= 启动 ================= */
 document.getElementById("langToggleBtn").textContent = lang === "zh" ? "EN" : "中";
-render();
+
+(async function bootstrap() {
+  db = await initDB();
+  render();
+})();
 </script>
 </body>
 </html>
