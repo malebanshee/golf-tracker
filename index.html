@@ -18,7 +18,7 @@
   创建凭据(API 密钥),并把密钥限制为你的 GitHub Pages 域名,防止被盗用。
   即使只用免费额度,Google 也要求绑定一张信用卡才能启用。
 -->
-<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAr2t_4Xsb41Lz_GVt47FNzJq83XQOD9-c"></script>
+<script src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY_HERE"></script>
 
 <style>
   :root {
@@ -162,6 +162,31 @@
     padding: 6px 0 2px;
   }
   .total-box .num { font-size: 26px; font-weight: 700; color: var(--green-dark); }
+  .gps-panel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #eef1ee;
+    margin-bottom: 8px;
+  }
+  .gps-panel.good { background: #e6f4ea; color: #16733a; }
+  .gps-panel.ok   { background: #fef7e0; color: #8a6d00; }
+  .gps-panel.bad  { background: #fce8e6; color: #b3261e; }
+  .gps-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: #999;
+    flex: none;
+  }
+  .gps-dot.good { background: #1e8e3e; }
+  .gps-dot.ok   { background: #f9ab00; }
+  .gps-dot.bad  { background: #d93025; }
+  .gps-dot.waiting { animation: gpsBlink 1s infinite; }
+  @keyframes gpsBlink { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }
+  .gps-samples { margin-left: auto; font-weight: 500; opacity: 0.75; }
   .link-action {
     color: var(--green);
     font-size: 13px;
@@ -283,6 +308,11 @@ const STRINGS = {
     markEnd: "标记落点",
     useGPS: "📍 用当前 GPS 位置标记",
     locating: "定位中...",
+    gpsAcquiring: "正在获取 GPS 定位...",
+    gpsAccuracy: m => `定位精度 ±${m} 米`,
+    gpsSamples: n => `${n} 次采样`,
+    gpsPoorHint: "精度较差。请到空旷处、站着别动等几秒让精度收敛;若长时间都是几十米以上,检查 iPhone 设置 → 隐私与安全性 → 定位服务 → Safari 网站 → 打开「精确位置」。",
+    gpsNotReady: "还没有拿到定位。请稍等几秒,或检查是否已允许本网站使用定位权限。",
     noGeoSupport: "这个浏览器不支持定位功能",
     gpsFailed: msg => `获取位置失败: ${msg}\n请检查是否已允许网页使用定位权限`,
     locale: "zh-CN",
@@ -302,6 +332,7 @@ const STRINGS = {
     markLandingHint: "点下方按钮用GPS定位,或直接在地图上点击标记这一杆的落点",
     finishHole: "结束此洞",
     holeFinishedBadge: "本洞已结束",
+    reopenHole: "重新打开此洞,继续记录",
     teeNotSetHint: "还没有标记开球点,先标记开球点才能开始记录这一洞",
     thisShotStart: "本杆起点",
     manualMarkStart: "手动标记起点",
@@ -344,6 +375,11 @@ const STRINGS = {
     markEnd: "Mark End",
     useGPS: "📍 Use Current GPS Location",
     locating: "Locating...",
+    gpsAcquiring: "Acquiring GPS fix...",
+    gpsAccuracy: m => `Accuracy \u00b1${m} m`,
+    gpsSamples: n => `${n} samples`,
+    gpsPoorHint: "Poor accuracy. Move to an open area and stand still for a few seconds to let it converge. If it stays above ~20 m, check iPhone Settings \u2192 Privacy & Security \u2192 Location Services \u2192 Safari Websites \u2192 enable Precise Location.",
+    gpsNotReady: "No GPS fix yet. Wait a few seconds, or check that location permission is allowed for this site.",
     noGeoSupport: "This browser doesn't support geolocation",
     gpsFailed: msg => `Failed to get location: ${msg}\nPlease check location permission for this site`,
     locale: "en-US",
@@ -363,6 +399,7 @@ const STRINGS = {
     markLandingHint: "Tap GPS below, or tap the map to mark this shot's landing spot",
     finishHole: "Finish Hole",
     holeFinishedBadge: "Hole completed",
+    reopenHole: "Reopen This Hole",
     teeNotSetHint: "Tee position not set yet \u2014 mark it before recording shots on this hole",
     thisShotStart: "Start of this shot",
     manualMarkStart: "Manually Mark Start",
@@ -558,12 +595,157 @@ function showInfo(map, marker, text) {
   return iw;
 }
 
+/* ================= GPS 采集 =================
+   一次性 getCurrentPosition 常常拿到 GPS 芯片锁星之前的粗定位(基站/WiFi 推算,误差几十米)。
+   这里改成持续 watchPosition 让精度收敛,并把多个采样按精度加权平均来压随机误差;
+   如果检测到人在移动(新点离平均值太远)就丢弃旧采样重新开始。
+*/
+const GPS_SAMPLE_LIMIT = 10;
+const GPS_MOVE_RESET_M = 20;
+
+const gps = {
+  watchId: null,
+  latest: null,      // 最近一次原始读数
+  best: null,        // 精度最好的一次原始读数
+  samples: [],       // 用于平均的采样
+  refined: null,     // 加权平均后的位置(实际拿来用的)
+  onUpdate: null,
+  mapMarker: null,
+  mapCircle: null,
+
+  start(onUpdate) {
+    // 已经在监听了(比如换球杆导致地图重建): 只换回调,保留已累积的采样,不让精度重新收敛
+    if (this.watchId !== null) {
+      this.onUpdate = onUpdate;
+      return;
+    }
+    this.latest = this.best = this.refined = null;
+    this.samples = [];
+    this.onUpdate = onUpdate;
+    if (!navigator.geolocation) return;
+    this.watchId = navigator.geolocation.watchPosition(
+      (pos) => this._onFix(pos),
+      (err) => { if (this.onUpdate) this.onUpdate({ error: err }); },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 }
+    );
+  },
+
+  _onFix(pos) {
+    const fix = {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      accuracy: pos.coords.accuracy
+    };
+    this.latest = fix;
+    if (!this.best || fix.accuracy <= this.best.accuracy) this.best = fix;
+
+    // 人在走动的话,之前的采样已经没有参考价值了,清掉重新累积
+    if (this.refined && distanceMeters(this.refined, fix) > GPS_MOVE_RESET_M) {
+      this.samples = [];
+    }
+    this.samples.push(fix);
+    if (this.samples.length > GPS_SAMPLE_LIMIT) this.samples.shift();
+
+    this.refined = this._weightedAverage();
+    if (this.onUpdate) this.onUpdate({ fix, refined: this.refined });
+  },
+
+  // 按 1/accuracy² 加权: 精度越好的读数权重越大
+  _weightedAverage() {
+    let wSum = 0, latSum = 0, lngSum = 0, accSum = 0;
+    this.samples.forEach(s => {
+      const w = 1 / Math.max(s.accuracy, 1) ** 2;
+      wSum += w; latSum += s.lat * w; lngSum += s.lng * w; accSum += s.accuracy * w;
+    });
+    if (!wSum) return null;
+    return {
+      lat: latSum / wSum,
+      lng: lngSum / wSum,
+      accuracy: accSum / wSum,
+      sampleCount: this.samples.length
+    };
+  },
+
+  // 当前最可信的位置: 优先用平均值,还没采到就退回单次最好读数
+  current() {
+    return this.refined || this.best || this.latest;
+  },
+
+  // 在地图上画一个随定位更新的蓝点 + 精度圈
+  attachMap(map) {
+    this.detachMap();
+    this.mapMarker = new google.maps.Marker({
+      map,
+      icon: { path: google.maps.SymbolPath.CIRCLE, scale: 6, fillColor: "#1a73e8", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 2 },
+      zIndex: 1
+    });
+    this.mapCircle = new google.maps.Circle({
+      map,
+      fillColor: "#1a73e8", fillOpacity: 0.12,
+      strokeColor: "#1a73e8", strokeOpacity: 0.35, strokeWeight: 1,
+      zIndex: 0
+    });
+    this.syncMapOverlay();
+  },
+
+  syncMapOverlay() {
+    const p = this.current();
+    if (!p || !this.mapMarker) return;
+    const pos = { lat: p.lat, lng: p.lng };
+    this.mapMarker.setPosition(pos);
+    this.mapCircle.setCenter(pos);
+    this.mapCircle.setRadius(p.accuracy || 0);
+  },
+
+  detachMap() {
+    if (this.mapMarker) { this.mapMarker.setMap(null); this.mapMarker = null; }
+    if (this.mapCircle) { this.mapCircle.setMap(null); this.mapCircle = null; }
+  },
+
+  stop() {
+    if (this.watchId !== null && navigator.geolocation) {
+      navigator.geolocation.clearWatch(this.watchId);
+    }
+    this.watchId = null;
+    this.onUpdate = null;
+    this.detachMap();
+  }
+};
+
+function accuracyClass(acc) {
+  if (acc == null) return "";
+  if (acc <= 8) return "good";
+  if (acc <= 20) return "ok";
+  return "bad";
+}
+
+// 定位质量面板: 让用户能看到当前精度,决定是等一会儿还是直接标记
+function renderGpsPanel() {
+  const el = document.getElementById("gpsPanel");
+  if (!el) return;
+  const p = gps.current();
+  if (!p) {
+    el.innerHTML = `<div class="gps-panel"><span class="gps-dot waiting"></span>${t("gpsAcquiring")}</div>`;
+    return;
+  }
+  const cls = accuracyClass(p.accuracy);
+  el.innerHTML = `
+    <div class="gps-panel ${cls}">
+      <span class="gps-dot ${cls}"></span>
+      <span>${t("gpsAccuracy", Math.round(p.accuracy))}</span>
+      ${p.sampleCount ? `<span class="gps-samples">${t("gpsSamples", p.sampleCount)}</span>` : ""}
+    </div>
+    ${cls === "bad" ? `<div class="hint">${t("gpsPoorHint")}</div>` : ""}
+  `;
+}
+
 /* ================= 路由 / 状态 ================= */
 let route = { screen: "rounds" };
 const app = document.getElementById("app");
 
 function nav(newRoute) {
   closeMenus();
+  gps.stop();
   route = newRoute;
   render();
 }
@@ -834,7 +1016,10 @@ function renderHoleDetail(roundId, holeId) {
       ${shots.length > 1 ? `<div class="hint">${t("deleteOnlyLastHint")}</div>` : ""}
 
       ${hole.finished
-        ? `<div class="card" style="text-align:center;color:var(--muted)">${t("holeFinishedBadge")}</div>`
+        ? `<div class="card" style="text-align:center">
+             <div class="sub" style="margin-bottom:10px">${t("holeFinishedBadge")}</div>
+             <button class="btn secondary" onclick="reopenHole('${round.id}','${hole.id}')">${t("reopenHole")}</button>
+           </div>`
         : (hole.teeLocation ? `<button class="btn secondary" onclick="finishHole('${round.id}','${hole.id}')">${t("finishHole")}</button>` : "")
       }
     </main>
@@ -851,6 +1036,15 @@ function finishHole(roundId, holeId) {
   hole.finished = true;
   saveDB();
   nav({ screen: "round", roundId });
+}
+
+// 误点了"结束此洞"(或推杆存完自动结束了但其实还没打完)时,重新打开继续记录
+function reopenHole(roundId, holeId) {
+  const round = findRound(roundId);
+  const hole = findHole(round, holeId);
+  hole.finished = false;
+  saveDB();
+  render();
 }
 
 function initHoleMap(hole) {
@@ -915,6 +1109,7 @@ function renderMarkTee(roundId, holeId) {
     </header>
     <main>
       <div class="hint">${t("markTeeHint")}</div>
+      <div id="gpsPanel"></div>
       <button class="btn secondary" id="teeGpsBtn" onclick="useTeeGPS()">${t("useGPS")}</button>
       <div id="teeMap"></div>
     </main>
@@ -947,25 +1142,26 @@ function initTeeMap() {
     setTeeCoordinate({ lat: e.latLng.lat(), lng: e.latLng.lng() });
   });
 
-  if (!teeDraft && navigator.geolocation) {
-    navigator.geolocation.getCurrentPosition((pos) => {
-      gmapTee.setCenter({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+  // 一进页面就开始持续定位,等用户按按钮时精度通常已经收敛了
+  let centeredOnce = !!teeDraft;
+  gps.start(() => {
+    renderGpsPanel();
+    gps.syncMapOverlay();
+    const p = gps.current();
+    if (p && !centeredOnce) {
+      centeredOnce = true;
+      gmapTee.setCenter({ lat: p.lat, lng: p.lng });
       gmapTee.setZoom(19);
-    }, () => {}, { enableHighAccuracy: true, timeout: 5000 });
-  }
+    }
+  });
+  gps.attachMap(gmapTee);
+  renderGpsPanel();
 }
 
 function useTeeGPS() {
-  if (!navigator.geolocation) { alert(t("noGeoSupport")); return; }
-  const btn = document.getElementById("teeGpsBtn");
-  btn.textContent = t("locating");
-  navigator.geolocation.getCurrentPosition((pos) => {
-    btn.textContent = t("useGPS");
-    setTeeCoordinate({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-  }, (err) => {
-    btn.textContent = t("useGPS");
-    alert(t("gpsFailed", err.message));
-  }, { enableHighAccuracy: true, timeout: 10000 });
+  const p = gps.current();
+  if (!p) { alert(t("gpsNotReady")); return; }
+  setTeeCoordinate({ lat: p.lat, lng: p.lng });
 }
 
 function setTeeCoordinate(coord) {
@@ -1071,6 +1267,7 @@ function renderAddShotMain() {
       </div>
     ` : ""}
 
+    <div id="gpsPanel"></div>
     <button class="btn secondary" id="gpsBtn" onclick="useGPS()">${t("useGPS")}</button>
     <div class="hint">${isPutter ? t("markHoleHint") : t("markLandingHint")}</div>
 
@@ -1146,23 +1343,21 @@ function initMap() {
     gmap.fitBounds(bounds, 60);
   }
 
+  // 进页面就开始持续定位,让精度在用户按按钮之前先收敛
+  gps.start(() => {
+    renderGpsPanel();
+    gps.syncMapOverlay();
+  });
+  gps.attachMap(gmap);
+  renderGpsPanel();
+
   updateDistanceBox();
 }
 
 function useGPS() {
-  if (!navigator.geolocation) {
-    alert(t("noGeoSupport"));
-    return;
-  }
-  const btn = document.getElementById("gpsBtn");
-  btn.textContent = t("locating");
-  navigator.geolocation.getCurrentPosition((pos) => {
-    btn.textContent = t("useGPS");
-    setCoordinate({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-  }, (err) => {
-    btn.textContent = t("useGPS");
-    alert(t("gpsFailed", err.message));
-  }, { enableHighAccuracy: true, timeout: 10000 });
+  const p = gps.current();
+  if (!p) { alert(t("gpsNotReady")); return; }
+  setCoordinate({ lat: p.lat, lng: p.lng });
 }
 
 function setCoordinate(coord) {
